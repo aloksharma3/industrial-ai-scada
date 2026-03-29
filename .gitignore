@@ -51,4 +51,4 @@ logs/
 # ── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-desktop.ini
+desktop.iniresults/cv/model/*.keras 
