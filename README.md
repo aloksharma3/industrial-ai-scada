@@ -111,7 +111,7 @@ bearingmind/
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/yourusername/bearingmind.git
+git clone https://github.com/aloksharma3/BearingMind.git
 cd bearingmind
 pip install -r requirements.txt
 ```
