@@ -130,82 +130,152 @@ python features.py
 # Step 2: Train anomaly detector
 python isolation_forest.py ../results/feature_matrix.csv ../results/if
 
-# Step 3: Train LSTM RUL predictors
-python src/rul_lstm.py results/feature_matrix.csv results/rul/ 30 50
+# Step 3: Train RUL predictor
+python rul_lstm.py ../results/feature_matrix.csv ../results/rul
 
-# Step 4: Convert signals to spectrogram images
-python src/signal_to_image.py <path-to-2nd_test> data/images/ 500 4
+# Step 4: Run SHAP explainability
+python shap_explainer.py ../results/feature_matrix.csv ../results ../results/shap
 
-# Step 5: Train CNN Autoencoder on healthy spectrograms
-python src/cv_anomaly_detector.py data/images/normal data/images/all results/cv/ 50
-
-# Step 6: Run SHAP explainability (uses saved models)
-python src/shap_explainer.py results/feature_matrix.csv results/ results/shap/ 950
+# Step 5: Run full RCA pipeline (loads trained models, queries MCP servers)
+python rca_agent.py ../results/feature_matrix.csv ../results 950 ../results/rca
 ```
 
-## Feature engineering
+### 4. (Optional) Enable LLM-generated reports
 
-16 features extracted per bearing per snapshot:
-
-- **Time-domain**: RMS, peak-to-peak, kurtosis, crest factor, skewness, shape factor, impulse factor, margin factor
-- **Frequency-domain**: spectral centroid, spectral bandwidth, spectral entropy, dominant frequency, high-frequency energy ratio
-- **Fault-band energy**: BPFO (outer race), BPFI (inner race), BSF (ball)
-
-## Explainability
-
-The SHAP explainer provides three layers of evidence for the RCA agent:
-
-1. **Isolation Forest SHAP** (TreeExplainer) — which statistical features drive the anomaly score
-2. **LSTM SHAP** (GradientExplainer) — which features drive the RUL prediction
-3. **CNN reconstruction heatmap** — which frequency bands in the spectrogram show abnormal patterns, mapped to fault types via frequency → fault mapping
-
-Example RCA context output:
-```
-Bearing: b1_ch1
-Snapshot index: 950
-Anomaly score: 0.4523
-RUL score: 0.1200 (CRITICAL)
-
-Top anomaly drivers (Isolation Forest SHAP):
-  - BPFO band energy (outer race): +0.3100 (↑ toward anomaly)
-  - Kurtosis: +0.2400 (↑ toward anomaly)
-
-CNN Autoencoder spectral analysis:
-  Reconstruction MSE: 0.012345 (ANOMALY)
-  Worst channel: STFT spectrogram
-  Worst frequency band: mid_low
-  Band fault inference: primary bearing fault frequency (BPFO/BPFI/BSF range)
-
-Probable fault type: outer race fault
+```bash
+export ANTHROPIC_API_KEY="sk-ant-api03-your-key-here"
+python rca_agent.py ../results/feature_matrix.csv ../results 950 ../results/rca
 ```
 
-## Repository structure
+Without the API key, the RCA agent works in template mode — same MCP queries, same structure, same pipeline. With the API key, Claude generates richer natural language analysis.
+
+---
+
+## Dataset
+
+**NASA IMS Bearing Dataset — 2nd Test**
+
+Four Rexnord ZA-2115 double row bearings on a loaded shaft running at 2000 RPM. PCB 353B33 accelerometers sampled at 20 kHz. 984 snapshots over ~7 days of continuous operation until outer race failure on Bearing 1.
+
+| Property | Value |
+|---|---|
+| Bearings | 4 (b1_ch1 through b4_ch1) |
+| Sampling rate | 20 kHz |
+| Snapshots | 984 |
+| Duration | ~7 days |
+| Failure mode | Outer race defect (Bearing 1) |
+
+---
+
+## ML models
+
+### Isolation Forest (anomaly detection)
+
+Unsupervised detector trained on the first 500 snapshots (healthy period). Scores each bearing independently against its healthy baseline. Threshold at 99th percentile of training scores.
+
+### LSTM (remaining useful life)
+
+Two-layer stacked LSTM (128 → 64 units) with dropout. Trained on linear RUL labels (1.0 → 0.0). Window size of 30 snapshots. Predicts a normalized RUL score where values below 0.15 are flagged as CRITICAL.
+
+| Bearing | MAE | RMSE |
+|---|---|---|
+| b1_ch1 | 0.093 | 0.121 |
+| b2_ch1 | 0.063 | 0.078 |
+| b3_ch1 | 0.050 | 0.062 |
+| b4_ch1 | 0.177 | 0.226 |
+
+### CNN Autoencoder (visual anomaly detection)
+
+Convolutional autoencoder trained on STFT spectrograms (64×64×3) of healthy vibration signals. Detects anomalies via reconstruction error.
+
+---
+
+## MCP servers
+
+### Equipment Manual MCP
+
+RAG server over bearing maintenance manuals. 12 knowledge base chunks from 3 sources (SKF Bearing Guide, Vibration Diagnostics Handbook, Industrial Motor Manual). TF-IDF retrieval with bigram indexing. Covers all fault types identified by SHAP: inner race, outer race, ball fault, impulsive damage, surface degradation, lubrication, and replacement procedures.
+
+### CMMS MCP (SQLite)
+
+Simulated Computerized Maintenance Management System backed by SQLite. Three tables: `assets` (4 bearings), `work_orders` (8 maintenance records), `spare_parts` (5 items with stock levels). Exposes 4 tools: `get_asset_info`, `get_work_orders`, `check_spare_parts`, `get_maintenance_summary`.
+
+---
+
+## SHAP explainability
+
+Every prediction is explained by SHAP:
+
+- **TreeExplainer** for Isolation Forest — exact SHAP values for each of the 16 features
+- **GradientExplainer** for LSTM — backpropagation-based SHAP values averaged over the prediction window
+- **Fault inference** — maps top SHAP features to fault types (BPFO → outer race, BPFI → inner race, BSF → ball fault)
+
+The SHAP output is the bridge between the ML models and the RCA agent. Without it, the agent would be guessing. With it, the agent has evidence to cite.
+
+---
+
+## Example output
+
+Running `python rca_agent.py ../results/feature_matrix.csv ../results 950 ../results/rca` produces:
 
 ```
-industrial-ai-scada/
-├── src/
-│   ├── __init__.py
-│   ├── features.py              # 16-feature extraction
-│   ├── isolation_forest.py      # Isolation Forest anomaly detection
-│   ├── signal_to_image.py       # STFT + Mel + GAF → 64×64×3 images
-│   ├── cv_anomaly_detector.py   # CNN Autoencoder anomaly detection
-│   ├── rul_lstm.py              # LSTM RUL prediction
-│   └── shap_explainer.py        # SHAP + CNN heatmaps → RCA context
-├── notebooks/
-│   ├── nasa_bearing_eda.ipynb
-│   └── nasa_bearing_eda.py
-├── results/                     # Generated outputs (see .gitignore)
-├── requirements.txt
-├── .gitignore
-└── README.md
+DIAGNOSIS: INNER RACE FAULT detected on b2_ch1
+URGENCY: HIGH
+
+EVIDENCE:
+  Anomaly score: 0.1407
+  RUL score: 0.1614 (WARNING)
+  Top driver: BPFI band energy (inner race)
+
+MAINTENANCE HISTORY:
+  Days since last maintenance: 118
+  Last finding: "BRG-002 stable. RMS 0.40 mm/s. No concerns."
+
+RECOMMENDED ACTIONS:
+  1. Schedule emergency maintenance within 48 hours
+  2. Inspect lubrication condition (60% of inner race failures)
+  3. Verify shaft alignment and interference fit
+  4. Replacement bearing RX-ZA2115 in stock (3 available)
+
+PARTS: RX-ZA2115, MOBIL-SHC220-1KG, SEAL-ZA2115-V — all in stock
 ```
 
-## Next steps (Week 2)
+---
 
-- LangGraph multi-agent orchestration
-- MCP servers: equipment manual RAG, CMMS mock, weather API, parts inventory
-- RCA Agent using Claude API for plain-English diagnostic reports
-- Streamlit or Gradio dashboard for live monitoring
+## Roadmap
+
+- [x] Feature extraction (16 features × 4 bearings)
+- [x] Isolation Forest anomaly detection
+- [x] LSTM remaining useful life prediction
+- [x] CNN autoencoder (visual anomaly detection)
+- [x] SHAP explainability layer
+- [x] Equipment Manual MCP server (RAG)
+- [x] CMMS MCP server (SQLite)
+- [x] RCA agent with MCP tool integration
+- [ ] Weather MCP (ambient temperature impact on bearing life)
+- [ ] Alert agent (notification routing by urgency)
+- [ ] LangGraph orchestrator (conditional agent routing)
+- [ ] Streamlit dashboard
+- [ ] Demo video
+
+---
+
+## Tech stack
+
+| Component | Technology |
+|---|---|
+| Feature engineering | NumPy, SciPy, librosa |
+| Anomaly detection | scikit-learn (Isolation Forest) |
+| RUL prediction | PyTorch (LSTM) |
+| Visual anomaly detection | PyTorch (CNN Autoencoder) |
+| Explainability | SHAP |
+| Manual retrieval | scikit-learn (TF-IDF), cosine similarity |
+| Maintenance database | SQLite |
+| RCA agent | Claude API (optional), template fallback |
+| Orchestration | LangGraph (planned) |
+| Dashboard | Streamlit (planned) |
+
+---
 
 ## Author
 
