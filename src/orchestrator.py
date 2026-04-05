@@ -7,9 +7,31 @@ its own next step based on intermediate results — this is what makes
 BearingMind agentic.
 
 Graph:
-    START → detect → [anomaly?] → explain → diagnose → alert → END
-                        │ no
-                        └──→ log_healthy → END
+    START → detect → [anomaly?] → explain → diagnose → alert ─┐
+                        │ no                                    │
+                        └──→ log_healthy ──────────────────────┘
+                                                                │
+                        log_metrics ← ──────────────────────────┘
+                            │
+                      [counter ≥ N?]
+                       yes │    no
+                      ┌────┴────┐
+                      ▼         ▼
+                check_drift    END
+                    │
+               [drift?]
+              yes │    no
+             ┌────┴────┐
+             ▼         ▼
+          retrain     END
+             │
+             ▼
+            END
+
+Three-tier monitoring (inspired by Uber Michelangelo):
+    Tier 1 — log_metrics  : every run (near-zero cost)
+    Tier 2 — check_drift  : every N runs (KS tests, moderate cost)
+    Tier 3 — retrain      : only when drift detected (expensive, rare)
 
 Usage:
     python orchestrator.py ../results/feature_matrix.csv ../results 950
@@ -42,6 +64,11 @@ class BearingMindState(TypedDict, total=False):
     alert_result: dict
     path_taken: list
     skipped_reason: str
+    # Retraining agent state
+    drift_metrics: dict
+    drift_check_due: bool
+    drift_result: dict
+    retrain_result: dict
 
 
 # ── Conditional routing ───────────────────────────────────────────────────────
@@ -53,6 +80,21 @@ def should_investigate(state: BearingMindState) -> str:
     return "log_healthy"
 
 
+def should_check_drift(state: BearingMindState) -> str:
+    """After log_metrics: run expensive drift check or skip to END?"""
+    if state.get("drift_check_due"):
+        return "check_drift"
+    return "__end__"
+
+
+def should_retrain(state: BearingMindState) -> str:
+    """After check_drift: retrain or skip to END?"""
+    drift = state.get("drift_result", {})
+    if drift.get("drift_detected"):
+        return "retrain"
+    return "__end__"
+
+
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
 def build_graph(feature_matrix: pd.DataFrame,
@@ -60,9 +102,15 @@ def build_graph(feature_matrix: pd.DataFrame,
                 rul_pred,
                 shap_explainer,
                 rca_agent,
-                alert_agent):
+                alert_agent,
+                retraining_agent=None):
     """
     Build the LangGraph with conditional routing.
+
+    Graph (with retraining):
+        START → detect → [anomaly?] → explain → diagnose → alert → log_metrics → [check due?] → check_drift → [drift?] → retrain → END
+                            │ no                                                      │ no                        │ no
+                            └──→ log_healthy → log_metrics → [check due?] → ...       └──→ END                    └──→ END
 
     Uses closures to capture model/agent references — LangGraph state
     only carries serializable data (scores, flags, reports), not
@@ -170,6 +218,37 @@ def build_graph(feature_matrix: pd.DataFrame,
             "path_taken":   state.get("path_taken", []) + ["alert"],
         }
 
+    # ── Node: log_metrics (Tier 1 — every run) ────────────────────────
+    def log_metrics_node(state: BearingMindState) -> dict:
+        if retraining_agent is None:
+            return {"path_taken": state.get("path_taken", []) + ["log_metrics"]}
+
+        log_result = retraining_agent.log_metrics(state)
+        return {
+            "drift_metrics": log_result,
+            "drift_check_due": log_result.get("check_due", False),
+            "path_taken": state.get("path_taken", []) + ["log_metrics"],
+        }
+
+    # ── Node: check_drift (Tier 2 — periodic) ─────────────────────────
+    def check_drift_node(state: BearingMindState) -> dict:
+        print(f"\n[check_drift] Running drift detection suite ...")
+        drift_result = retraining_agent.check_drift(feature_matrix)
+        return {
+            "drift_result": drift_result,
+            "path_taken": state.get("path_taken", []) + ["check_drift"],
+        }
+
+    # ── Node: retrain (Tier 3 — rare) ─────────────────────────────────
+    def retrain_node(state: BearingMindState) -> dict:
+        print(f"\n[retrain] Retraining triggered by drift detection ...")
+        result = retraining_agent.retrain(
+            feature_matrix, state["drift_result"])
+        return {
+            "retrain_result": result,
+            "path_taken": state.get("path_taken", []) + ["retrain"],
+        }
+
     # ── Wire the graph ────────────────────────────────────────────────
     graph = StateGraph(BearingMindState)
 
@@ -178,6 +257,9 @@ def build_graph(feature_matrix: pd.DataFrame,
     graph.add_node("explain",     explain_node)
     graph.add_node("diagnose",    diagnose_node)
     graph.add_node("alert",       alert_node)
+    graph.add_node("log_metrics", log_metrics_node)
+    graph.add_node("check_drift", check_drift_node)
+    graph.add_node("retrain",     retrain_node)
 
     graph.set_entry_point("detect")
     graph.add_conditional_edges(
@@ -185,8 +267,22 @@ def build_graph(feature_matrix: pd.DataFrame,
         {"explain": "explain", "log_healthy": "log_healthy"})
     graph.add_edge("explain", "diagnose")
     graph.add_edge("diagnose", "alert")
-    graph.add_edge("alert", END)
-    graph.add_edge("log_healthy", END)
+
+    # Both alert and log_healthy converge to log_metrics
+    graph.add_edge("alert", "log_metrics")
+    graph.add_edge("log_healthy", "log_metrics")
+
+    # log_metrics → conditional: check drift or end
+    graph.add_conditional_edges(
+        "log_metrics", should_check_drift,
+        {"check_drift": "check_drift", "__end__": END})
+
+    # check_drift → conditional: retrain or end
+    graph.add_conditional_edges(
+        "check_drift", should_retrain,
+        {"retrain": "retrain", "__end__": END})
+
+    graph.add_edge("retrain", END)
 
     return graph.compile()
 
@@ -270,9 +366,23 @@ def run_pipeline(feature_matrix_path: str,
         cmms_mcp=cmms_mcp,
         log_path=os.path.join(output_dir, "alert_log.json"))
 
+    # ── Retraining agent (three-tier monitoring) ──────────────────────
+    retrain_agent = None
+    try:
+        from retraining_agent import RetrainingAgent
+        retrain_agent = RetrainingAgent(
+            check_every=2,
+            metrics_path=os.path.join(output_dir, "drift_metrics.json"),
+            models_dir=models_dir)
+        print("  Retraining agent: active "
+              f"(check every {retrain_agent.check_every} runs)")
+    except Exception as e:
+        print(f"  Retraining agent: skipped ({e})")
+
     # ── Build and run graph ───────────────────────────────────────────
     print("\n[setup] Building LangGraph orchestrator ...")
-    app = build_graph(df, anomaly_det, rul_pred, shap_exp, rca, alert)
+    app = build_graph(df, anomaly_det, rul_pred, shap_exp, rca, alert,
+                      retraining_agent=retrain_agent)
 
     print(f"\n{'='*60}")
     print(f"Running graph for snapshot {snapshot_index} ...")
@@ -297,6 +407,14 @@ def run_pipeline(feature_matrix_path: str,
         print(f"  Skipped: {result['skipped_reason']}")
     if result.get("alert_result"):
         print(f"  Alert: {result['alert_result'].get('summary', '')}")
+    if result.get("drift_result"):
+        drift = result["drift_result"]
+        print(f"  Drift: {'DETECTED' if drift.get('drift_detected') else 'none'}"
+              f" — {', '.join(drift.get('drift_reasons', []))}")
+    if result.get("retrain_result"):
+        models = [m["model"] for m in result["retrain_result"].get(
+            "models_retrained", []) if "error" not in m]
+        print(f"  Retrained: {', '.join(models) if models else 'none'}")
     print(f"{'='*60}")
 
     cmms_mcp.close()
