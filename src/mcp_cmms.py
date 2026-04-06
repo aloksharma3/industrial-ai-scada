@@ -488,7 +488,7 @@ class CMMSMCP:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
         db_exists = os.path.exists(self.db_path)
-        self.conn_ = sqlite3.connect(self.db_path)
+        self.conn_ = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn_.row_factory = sqlite3.Row  # dict-like row access
 
         if not db_exists or force_rebuild:

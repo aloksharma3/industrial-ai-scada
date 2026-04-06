@@ -58,5 +58,37 @@
       "slack:#maintenance"
     ],
     "work_order": "WO-2026-0401-AI"
+  },
+  {
+    "timestamp": "2026-04-02T00:42:43.657159",
+    "bearing_id": "b2_ch1",
+    "fault_type": "inner race fault",
+    "urgency": "HIGH",
+    "response": "Within 48 hours",
+    "notified": [
+      "J. Chen",
+      "A. Kumar"
+    ],
+    "channels": [
+      "email",
+      "slack:#maintenance"
+    ],
+    "work_order": "WO-2026-0402-AI"
+  },
+  {
+    "timestamp": "2026-04-02T00:43:10.207453",
+    "bearing_id": "b2_ch1",
+    "fault_type": "inner race fault",
+    "urgency": "HIGH",
+    "response": "Within 48 hours",
+    "notified": [
+      "J. Chen",
+      "A. Kumar"
+    ],
+    "channels": [
+      "email",
+      "slack:#maintenance"
+    ],
+    "work_order": "WO-2026-0402-AI"
   }
 ]
