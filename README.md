@@ -6,7 +6,8 @@ BearingMind detects bearing faults, predicts remaining useful life, explains *wh
 
 Designed to demonstrate the architecture used in production systems at companies like Schneider Electric, Siemens, ABB, and GE Vernova.
 
----
+## Live Demo
+👉 [**Try BearingMind Live**](https://alok2805-bearingmind.hf.space)
 
 ## What it does
 
